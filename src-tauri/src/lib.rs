@@ -38,6 +38,7 @@ mod mcp;
 pub mod mode;
 mod model_capabilities;
 mod omp_config;
+mod opencharm;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
@@ -1340,6 +1341,7 @@ pub fn run() {
                 app.handle().clone(),
             );
             // 将同一个实例注入到全局状态，避免重复创建导致的不一致
+            app.manage(std::sync::Arc::new(opencharm::RuntimeManager::default()));
             app.manage(app_state);
             app.manage(services::kimi_oauth::KimiOAuthManager::default());
 
@@ -1612,6 +1614,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::get_opencharm_status,
+            commands::start_opencharm,
+            commands::stop_opencharm,
             commands::get_providers,
             commands::get_current_provider,
             commands::add_provider,
@@ -2166,6 +2171,16 @@ pub fn run() {
 /// 把接上代理的客户端都指回直连（模式和代理路由保留，下次启动再接上），再停止代理。
 /// 客户端不能一直指着代理：开机自启默认关闭，CC Switch 一关客户端就连不上了。
 pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
+    // OpenCharm integration hook: only an actual application exit stops the
+    // owned child. Minimizing to tray is handled separately above.
+    if let Some(runtime) = app_handle.try_state::<std::sync::Arc<opencharm::RuntimeManager>>() {
+        let runtime = std::sync::Arc::clone(&*runtime);
+        match tokio::task::spawn_blocking(move || runtime.stop()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => log::warn!("OpenCharm shutdown failed: {error}"),
+            Err(error) => log::warn!("OpenCharm shutdown join failed: {error}"),
+        }
+    }
     if let Some(state) = app_handle.try_state::<store::AppState>() {
         crate::mode::controller::detach_all(state.inner()).await;
         // 切换后几秒内退出：给开着的 Claude Code 会话写的空值墓碑现在删掉（刚写的最多等 3 秒），
